@@ -288,55 +288,121 @@ func ExtractMedia(b string, more_mode bool) (string, string, string, error) {
 		qualityForFilename = fmt.Sprintf("%d kbps", bestBitrate)
 	} else if core.Dl_aac {
 		requested := *core.Aac_type
-		var bestVariant *m3u8.Variant
-		bestBandwidth := uint64(0)
 
-		for _, variant := range master.Variants {
-			isAACLC := variant.Codecs == "mp4a.40.2"
-			isHEAAC := variant.Codecs == "mp4a.40.5"
-			if !isAACLC && !isHEAAC {
-				continue
-			}
-
-			audio := strings.ToLower(variant.Audio)
-			isBinaural := strings.Contains(audio, "binaural")
-			isDownmix := strings.Contains(audio, "downmix")
-			isRegular := !isBinaural && !isDownmix
-
-			matches := false
-			switch requested {
-			case "aac-binaural":
-				matches = isBinaural
-			case "aac-downmix":
-				matches = isDownmix
-			case "aac-lc", "aac":
-				matches = isAACLC && isRegular
-			}
-			if !matches {
-				continue
-			}
-
-			bandwidth := uint64(variant.AverageBandwidth)
-			if bestVariant == nil || bandwidth > bestBandwidth {
-				v := variant
-				bestVariant = v
-				bestBandwidth = bandwidth
-			}
-		}
-
-		if bestVariant == nil {
-			return "", "", qualityForDisplay, fmt.Errorf("requested AAC stream type %q is not available", requested)
-		}
-
-		streamUrl, _ = masterUrl.Parse(bestVariant.URI)
+		// AAC fallback ladder. Keep the requested mix when possible, then
+		// degrade predictably instead of jumping to the highest variant.
+		// Downmix  -> Binaural -> regular AAC-LC -> ALAC <= 48 kHz
+		// Binaural -> Downmix  -> regular AAC-LC -> ALAC <= 48 kHz
+		// AAC      -> regular AAC-LC -> ALAC <= 48 kHz
+		priorities := []string{"aac"}
 		switch requested {
-		case "aac-binaural":
-			qualityForFilename = "AAC Binaural"
 		case "aac-downmix":
-			qualityForFilename = "AAC Downmix"
-		default:
-			qualityForFilename = "AAC"
+			priorities = []string{"aac-downmix", "aac-binaural", "aac"}
+		case "aac-binaural":
+			priorities = []string{"aac-binaural", "aac-downmix", "aac"}
+		case "aac-lc", "aac":
+			priorities = []string{"aac"}
 		}
+
+		findAAC := func(kind string) *m3u8.Variant {
+			var best *m3u8.Variant
+			bestBandwidth := uint64(0)
+			for _, variant := range master.Variants {
+				isAACLC := variant.Codecs == "mp4a.40.2"
+				isHEAAC := variant.Codecs == "mp4a.40.5"
+				if !isAACLC && !isHEAAC {
+					continue
+				}
+
+				audio := strings.ToLower(variant.Audio)
+				isBinaural := strings.Contains(audio, "binaural")
+				isDownmix := strings.Contains(audio, "downmix")
+				isRegular := !isBinaural && !isDownmix
+
+				matches := false
+				switch kind {
+				case "aac-downmix":
+					matches = isDownmix
+				case "aac-binaural":
+					matches = isBinaural
+				case "aac":
+					matches = isAACLC && isRegular
+				}
+				if !matches {
+					continue
+				}
+
+				bandwidth := uint64(variant.AverageBandwidth)
+				if best == nil || bandwidth > bestBandwidth {
+					v := variant
+					best = v
+					bestBandwidth = bandwidth
+				}
+			}
+			return best
+		}
+
+		selectedKind := ""
+		var bestVariant *m3u8.Variant
+		for _, kind := range priorities {
+			if v := findAAC(kind); v != nil {
+				bestVariant = v
+				selectedKind = kind
+				break
+			}
+		}
+
+		if bestVariant != nil {
+			streamUrl, _ = masterUrl.Parse(bestVariant.URI)
+			switch selectedKind {
+			case "aac-downmix":
+				qualityForFilename = "AAC Downmix"
+			case "aac-binaural":
+				qualityForFilename = "AAC Binaural"
+			default:
+				qualityForFilename = "AAC"
+			}
+		} else {
+			// Last-resort fallback is standard lossless only. Never allow an AAC
+			// request to jump to 96/192 kHz Hi-Res ALAC.
+			var bestAlac *m3u8.Variant
+			bestSampleRate := -1
+			bestBitDepth := -1
+			bestBandwidth := uint64(0)
+
+			for _, variant := range master.Variants {
+				if variant.Codecs != "alac" {
+					continue
+				}
+				split := strings.Split(variant.Audio, "-")
+				if len(split) < 2 {
+					continue
+				}
+				sampleRate, err := strconv.Atoi(split[len(split)-2])
+				if err != nil || sampleRate > 48000 {
+					continue
+				}
+				bitDepth, _ := strconv.Atoi(split[len(split)-1])
+				bandwidth := uint64(variant.AverageBandwidth)
+				if bestAlac == nil ||
+					sampleRate > bestSampleRate ||
+					(sampleRate == bestSampleRate && bitDepth > bestBitDepth) ||
+					(sampleRate == bestSampleRate && bitDepth == bestBitDepth && bandwidth > bestBandwidth) {
+					v := variant
+					bestAlac = v
+					bestSampleRate = sampleRate
+					bestBitDepth = bitDepth
+					bestBandwidth = bandwidth
+				}
+			}
+
+			if bestAlac == nil {
+				return "", "", qualityForDisplay, fmt.Errorf("requested AAC stream type %q and all configured fallbacks are unavailable", requested)
+			}
+			streamUrl, _ = masterUrl.Parse(bestAlac.URI)
+			qualityForFilename = fmt.Sprintf("%dB-%.1fkHz", bestBitDepth, float64(bestSampleRate)/1000.0)
+		}
+
 	} else {
 		var bestVariant *m3u8.Variant
 		bestSampleRate := -1
