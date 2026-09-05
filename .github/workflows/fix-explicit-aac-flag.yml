@@ -1,0 +1,37 @@
+name: Fix explicit AAC flag
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-explicit-aac-flag.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch explicit aac-type handling
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('internal/core/state.go')
+          s = p.read_text()
+          old = '''\tif *Aac_type == "aac" {\n\t\tAac_type = &Config.AacType\n\t}\n'''
+          new = '''\tif !pflag.CommandLine.Changed("aac-type") {\n\t\tAac_type = &Config.AacType\n\t}\n'''
+          if old not in s:
+              raise SystemExit('expected AAC config fallback block not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          gofmt -w internal/core/state.go
+          go build ./...
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f internal/core/state.go
+          git commit -m "fix: respect explicit AAC stream type" || exit 0
+          git push
