@@ -1,0 +1,88 @@
+name: Apply Hi-Res wrapper fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-hires-wrapper-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply proven Hi-Res M3U8 fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("internal/downloader/downloader.go")
+          s = p.read_text()
+
+          start_marker = "\tneedCheck := false"
+          end_marker = "\n\tvar TrackQuality string"
+
+          if start_marker not in s:
+              raise SystemExit("Expected Sky needCheck block not found; refusing to patch blindly")
+
+          start = s.index(start_marker)
+          end = s.index(end_marker, start)
+
+          new = '''\t// Always ask the wrapper/device for the real M3U8 in hires/all mode.
+          \t// The catalog manifest can expose only 24/48 even when the device
+          \t// M3U8 contains 24/96 or 24/192.
+          \tneedCheck := core.Config.GetM3u8Mode == "all" ||
+          \t\tcore.Config.GetM3u8Mode == "hires"
+
+          \tvar EnhancedHls_m3u8 string
+
+          \tif needCheck && !needDlAacLc {
+          \t\tif cachedM3u8, ok := m3u8Cache.Load(track.ID); ok {
+          \t\t\tEnhancedHls_m3u8 = cachedM3u8.(string)
+          \t\t} else {
+          \t\t\tfor r := 0; r < 5; r++ {
+          \t\t\t\tuiM3u8, _ := parser.CheckM3u8(track.ID, "song", account)
+
+          \t\t\t\tif strings.HasSuffix(uiM3u8, ".m3u8") {
+          \t\t\t\t\tEnhancedHls_m3u8 = uiM3u8
+          \t\t\t\t\tm3u8Cache.Store(track.ID, uiM3u8)
+          \t\t\t\t\tbreak
+          \t\t\t\t}
+
+          \t\t\t\ttime.Sleep(500 * time.Millisecond)
+          \t\t\t}
+          \t\t}
+
+          \t\tif EnhancedHls_m3u8 != "" {
+          \t\t\tmanifest.Attributes.ExtendedAssetUrls.EnhancedHls = EnhancedHls_m3u8
+          \t\t}
+          \t}
+          '''
+
+          s = s[:start] + new + s[end:]
+          p.write_text(s)
+          print("Applied Hi-Res wrapper/device M3U8 fix")
+          PY
+
+          gofmt -w internal/downloader/downloader.go
+
+      - name: Commit patched source
+        shell: bash
+        run: |
+          if git diff --quiet -- internal/downloader/downloader.go; then
+            echo "No patch changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add internal/downloader/downloader.go
+          git commit -m "fix: force device M3U8 lookup for Hi-Res ALAC"
+          git push
