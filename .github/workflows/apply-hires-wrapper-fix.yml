@@ -86,3 +86,5 @@ jobs:
           git add internal/downloader/downloader.go
           git commit -m "fix: force device M3U8 lookup for Hi-Res ALAC"
           git push
+
+# Triggered after fork creation so the one-shot patch can run on main.
