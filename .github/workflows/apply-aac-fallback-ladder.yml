@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths:
+      - scripts/apply_aac_fallback_ladder.py
       - .github/workflows/apply-aac-fallback-ladder.yml
 
 permissions:
@@ -15,146 +16,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Patch AAC fallback ladder
-        shell: bash
+      - name: Apply fallback patch
+        run: python3 scripts/apply_aac_fallback_ladder.py
+
+      - name: Format and compile
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path('internal/parser/m3u8.go')
-          s = p.read_text()
-
-          start = s.index('\t} else if core.Dl_aac {\n', s.index('// Select only a stream that actually matches the requested mode.'))
-          end = s.index('\n\t} else {\n\t\tvar bestVariant *m3u8.Variant', start)
-
-          new = r'''	} else if core.Dl_aac {
-		requested := *core.Aac_type
-
-		// AAC fallback ladder. Keep the requested mix when possible, then
-		// degrade predictably instead of jumping to the highest variant.
-		// Downmix  -> Binaural -> regular AAC-LC -> ALAC <= 48 kHz
-		// Binaural -> Downmix  -> regular AAC-LC -> ALAC <= 48 kHz
-		// AAC      -> regular AAC-LC -> ALAC <= 48 kHz
-		priorities := []string{"aac"}
-		switch requested {
-		case "aac-downmix":
-			priorities = []string{"aac-downmix", "aac-binaural", "aac"}
-		case "aac-binaural":
-			priorities = []string{"aac-binaural", "aac-downmix", "aac"}
-		case "aac-lc", "aac":
-			priorities = []string{"aac"}
-		}
-
-		findAAC := func(kind string) *m3u8.Variant {
-			var best *m3u8.Variant
-			bestBandwidth := uint64(0)
-			for _, variant := range master.Variants {
-				isAACLC := variant.Codecs == "mp4a.40.2"
-				isHEAAC := variant.Codecs == "mp4a.40.5"
-				if !isAACLC && !isHEAAC {
-					continue
-				}
-
-				audio := strings.ToLower(variant.Audio)
-				isBinaural := strings.Contains(audio, "binaural")
-				isDownmix := strings.Contains(audio, "downmix")
-				isRegular := !isBinaural && !isDownmix
-
-				matches := false
-				switch kind {
-				case "aac-downmix":
-					matches = isDownmix
-				case "aac-binaural":
-					matches = isBinaural
-				case "aac":
-					matches = isAACLC && isRegular
-				}
-				if !matches {
-					continue
-				}
-
-				bandwidth := uint64(variant.AverageBandwidth)
-				if best == nil || bandwidth > bestBandwidth {
-					v := variant
-					best = v
-					bestBandwidth = bandwidth
-				}
-			}
-			return best
-		}
-
-		selectedKind := ""
-		var bestVariant *m3u8.Variant
-		for _, kind := range priorities {
-			if v := findAAC(kind); v != nil {
-				bestVariant = v
-				selectedKind = kind
-				break
-			}
-		}
-
-		if bestVariant != nil {
-			streamUrl, _ = masterUrl.Parse(bestVariant.URI)
-			switch selectedKind {
-			case "aac-downmix":
-				qualityForFilename = "AAC Downmix"
-			case "aac-binaural":
-				qualityForFilename = "AAC Binaural"
-			default:
-				qualityForFilename = "AAC"
-			}
-		} else {
-			// Last-resort fallback is standard lossless only. Never allow an AAC
-			// request to jump to 96/192 kHz Hi-Res ALAC.
-			var bestAlac *m3u8.Variant
-			bestSampleRate := -1
-			bestBitDepth := -1
-			bestBandwidth := uint64(0)
-
-			for _, variant := range master.Variants {
-				if variant.Codecs != "alac" {
-					continue
-				}
-				split := strings.Split(variant.Audio, "-")
-				if len(split) < 2 {
-					continue
-				}
-				sampleRate, err := strconv.Atoi(split[len(split)-2])
-				if err != nil || sampleRate > 48000 {
-					continue
-				}
-				bitDepth, _ := strconv.Atoi(split[len(split)-1])
-				bandwidth := uint64(variant.AverageBandwidth)
-				if bestAlac == nil ||
-					sampleRate > bestSampleRate ||
-					(sampleRate == bestSampleRate && bitDepth > bestBitDepth) ||
-					(sampleRate == bestSampleRate && bitDepth == bestBitDepth && bandwidth > bestBandwidth) {
-					v := variant
-					bestAlac = v
-					bestSampleRate = sampleRate
-					bestBitDepth = bitDepth
-					bestBandwidth = bandwidth
-				}
-			}
-
-			if bestAlac == nil {
-				return "", "", qualityForDisplay, fmt.Errorf("requested AAC stream type %q and all configured fallbacks are unavailable", requested)
-			}
-			streamUrl, _ = masterUrl.Parse(bestAlac.URI)
-			qualityForFilename = fmt.Sprintf("%dB-%.1fkHz", bestBitDepth, float64(bestSampleRate)/1000.0)
-		}
-'''
-
-          s = s[:start] + new + s[end:]
-          p.write_text(s)
-          PY
-
           gofmt -w internal/parser/m3u8.go
           go build ./...
 
       - name: Commit
-        shell: bash
         run: |
+          if git diff --quiet -- internal/parser/m3u8.go; then
+            echo "No fallback changes to commit."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f internal/parser/m3u8.go
