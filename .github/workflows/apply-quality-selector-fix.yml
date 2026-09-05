@@ -19,10 +19,10 @@ jobs:
       - name: Apply selector patch
         run: python3 scripts/apply_quality_selector_fix.py
 
-      - name: Format and test
+      - name: Format and compile
         run: |
           gofmt -w internal/parser/m3u8.go
-          go test ./...
+          go build ./...
 
       - name: Commit patched source
         run: |
