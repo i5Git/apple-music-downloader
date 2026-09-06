@@ -122,6 +122,20 @@ func finalizeAppleMusicMP4(trackPath string) error {
 		return fmt.Errorf("MP4Box is not available: %w", err)
 	}
 
+	alacDescriptions, err := metadata.CaptureALACSampleDescriptions(trackPath)
+	if err != nil {
+		return fmt.Errorf("could not inspect ALAC sample description: %w", err)
+	}
+	if err := metadata.RestoreALACSampleDescriptions(
+		trackPath,
+		alacDescriptions,
+	); err != nil {
+		return fmt.Errorf(
+			"could not normalize ALAC bit depth before MP4Box finalization: %w",
+			err,
+		)
+	}
+
 	cmd := exec.Command(
 		"MP4Box",
 		"-quiet",
@@ -137,6 +151,16 @@ func finalizeAppleMusicMP4(trackPath string) error {
 			return fmt.Errorf("MP4Box finalization failed: %w: %s", err, detail)
 		}
 		return fmt.Errorf("MP4Box finalization failed: %w", err)
+	}
+
+	if err := metadata.RestoreALACSampleDescriptions(
+		trackPath,
+		alacDescriptions,
+	); err != nil {
+		return fmt.Errorf(
+			"could not preserve ALAC bit depth after MP4Box finalization: %w",
+			err,
+		)
 	}
 
 	info, err := os.Stat(trackPath)
